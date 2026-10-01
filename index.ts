@@ -32,6 +32,8 @@ import {
 	type ProjectRecord,
 	type ValidationResult,
 	detectProjectForCwd,
+	detectRepoName,
+	findProjectByName,
 	getProject,
 	listProjects,
 	loadState,
@@ -213,25 +215,55 @@ export default function piHarness(pi: ExtensionAPI) {
 		return (await loadState()).enabled === false;
 	};
 
+	// Per-session switch: set when this repo has no matching harness.
+	let sessionDisabled = false;
+
 	// Refresh the footer status whenever a session starts.
+	// Default: adopt the harness whose name matches the active git repo; if none
+	// exists, pi-harness stays off for the session.
 	pi.on("session_start", async (_event, ctx) => {
 		const state = await loadState();
+		sessionDisabled = false;
 		if (state.enabled === false || pi.getFlag("no-harness") === true) {
+			sessionDisabled = true;
 			ctx.ui.setStatus("pi-harness", "pi-harness: off");
 			return;
 		}
-		const detected = detectProjectForCwd(state, ctx.cwd);
-		if (detected && state.active !== detected.name) {
-			state.active = detected.name;
-			await saveState(state);
+
+		// 1. cwd inside a harness workspace wins outright.
+		const inside = detectProjectForCwd(state, ctx.cwd);
+		if (inside) {
+			if (state.active !== inside.name) {
+				state.active = inside.name;
+				await saveState(state);
+			}
+			ctx.ui.setStatus("pi-harness", `harness: ${inside.name}`);
+			return;
 		}
-		const record = detected ?? resolveProject(state);
-		if (record) ctx.ui.setStatus("pi-harness", `harness: ${record.name}`);
+
+		// 2. Otherwise match the active repo name to a harness project.
+		const repoName = await detectRepoName(ctx.cwd);
+		const matched = repoName ? findProjectByName(state, repoName) : undefined;
+		if (matched) {
+			if (state.active !== matched.name) {
+				state.active = matched.name;
+				await saveState(state);
+			}
+			ctx.ui.setStatus("pi-harness", `harness: ${matched.name}`);
+			return;
+		}
+
+		// 3. No harness for this repo → off for this session.
+		sessionDisabled = true;
+		ctx.ui.setStatus(
+			"pi-harness",
+			repoName ? `pi-harness: off (no harness '${repoName}')` : "pi-harness: off",
+		);
 	});
 
 	// The core mechanism: tell the agent where the harness lives every turn.
 	pi.on("before_agent_start", async (event, ctx) => {
-		if (await isDisabled()) return;
+		if (sessionDisabled || (await isDisabled())) return;
 		const state = await loadState();
 		const record = resolveProject(state) ?? detectProjectForCwd(state, ctx.cwd);
 		if (!record) return;

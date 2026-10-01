@@ -189,6 +189,35 @@ export function detectProjectForCwd(state: HarnessState, cwd: string): ProjectRe
 	return undefined;
 }
 
+/**
+ * Derive the active repository's name from cwd: the basename of the enclosing
+ * git repository, falling back to the basename of cwd.
+ */
+export async function detectRepoName(cwd: string): Promise<string | undefined> {
+	let dir = resolve(cwd);
+	while (true) {
+		if (await pathExists(join(dir, ".git"))) return basename(dir);
+		const parent = dirname(dir);
+		if (parent === dir) break;
+		dir = parent;
+	}
+	const base = basename(resolve(cwd));
+	if (!base || base === sep || base === "/") return undefined;
+	return base;
+}
+
+/** Find a project by name (exact, case-insensitive, or sanitized form). */
+export function findProjectByName(state: HarnessState, name: string): ProjectRecord | undefined {
+	const wanted = name.trim().toLowerCase();
+	if (!wanted) return undefined;
+	const sanitized = sanitizeName(name)?.toLowerCase();
+	for (const record of listProjects(state)) {
+		const key = record.name.toLowerCase();
+		if (key === wanted || (sanitized && key === sanitized)) return record;
+	}
+	return undefined;
+}
+
 /** Resolve a harness-relative file, rejecting paths outside the harness root. */
 export function resolveHarnessFile(record: ProjectRecord, file: string): string | undefined {
 	const clean = file.trim().replace(/^\.\//, "");

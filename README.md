@@ -84,10 +84,21 @@ toggle in `~/.pi/agent/pi-harness-state.json`.
 
 ## Automatic lookup
 
-Two hooks make the harness the default place to look:
+Two hooks make the harness the default place to look, and by default the
+harness is chosen by **name matching the active repo**:
 
-- `session_start` — detects whether the cwd is inside a harness and sets it active.
+- `session_start` — resolves the active harness in this order:
+  1. If the cwd is inside `~/pi-harness/<name>`, that harness wins.
+  2. Otherwise it takes the enclosing git repository's name (falling back to
+     the cwd basename) and activates the harness with the same name
+     (case-insensitive; `_`/`-` tolerant).
+  3. If no harness matches, pi-harness stays **off for the session** —
+     nothing is injected until a matching harness exists (create one with
+     `/ha-init <name>`).
 - `before_agent_start` — injects a `harness_state` system-prompt section with
   the harness root, key files, and current feature state.
+
+The persisted `/ha-disable` toggle and the `--no-harness` flag still win over
+auto-selection.
 
 Set `PI_HARNESS_ROOT=/some/path` to move the root out of `~/pi-harness`.
