@@ -6,7 +6,7 @@
  */
 
 import { execFile } from "node:child_process";
-import { access, chmod, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, readdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
@@ -173,6 +173,70 @@ export async function setEnabled(enabled: boolean): Promise<HarnessState> {
 	state.enabled = enabled;
 	await saveState(state);
 	return state;
+}
+
+export interface EditProjectOptions {
+	/** New harness name (renames the workspace folder). */
+	newName?: string;
+	/** New harness workspace directory (absolute, or relative to the current location). */
+	newPath?: string;
+	/** New source project root that `/ha-learn` scans. */
+	projectRoot?: string;
+}
+
+export interface EditProjectResult {
+	record: ProjectRecord;
+	renamed: boolean;
+	moved: boolean;
+	previousName: string;
+	previousPath: string;
+}
+
+/** Rename a harness and/or move its folder, and/or repoint its project root. */
+export async function editProject(currentName: string, options: EditProjectOptions): Promise<EditProjectResult> {
+	const state = await loadState();
+	const record = state.projects[currentName];
+	if (!record) throw new Error(`Unknown harness project: ${currentName}`);
+
+	const trimmedName = options.newName?.trim();
+	const targetName = trimmedName ? sanitizeName(trimmedName) : record.name;
+	if (!targetName) throw new Error(`Invalid harness name: ${options.newName}`);
+	if (targetName !== record.name && state.projects[targetName]) {
+		throw new Error(`A harness named ${targetName} already exists`);
+	}
+
+	const previousPath = record.path;
+	let targetPath = resolve(record.path);
+	if (options.newPath?.trim()) {
+		targetPath = resolve(options.newPath.trim());
+	} else if (targetName !== record.name) {
+		targetPath = join(dirname(record.path), targetName);
+	}
+
+	const renamed = targetName !== record.name;
+	const moved = targetPath !== previousPath;
+
+	if (moved) {
+		if (targetPath === resolve(record.path)) {
+			// no-op
+		} else if (await pathExists(targetPath)) {
+			throw new Error(`Target path already exists: ${targetPath}`);
+		}
+		if (!(await pathExists(record.path))) throw new Error(`Harness folder is missing: ${record.path}`);
+		await mkdir(dirname(targetPath), { recursive: true });
+		await rename(record.path, targetPath);
+	}
+
+	if (renamed) delete state.projects[currentName];
+	record.name = targetName;
+	record.path = targetPath;
+	if (options.projectRoot?.trim()) record.projectRoot = resolve(options.projectRoot.trim());
+	record.updatedAt = new Date().toISOString();
+	state.projects[targetName] = record;
+	if (state.active === currentName) state.active = targetName;
+	await saveState(state);
+
+	return { record, renamed, moved, previousName: currentName, previousPath };
 }
 
 export function toPosix(p: string): string {

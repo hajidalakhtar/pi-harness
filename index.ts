@@ -9,6 +9,7 @@
  *   /ha-list             list every harness workspace
  *   /ha-status           show the active harness and feature state
  *   /ha-learn [name]     scan the source code and seed the harness docs/features
+ *   /ha-edit [name]      rename a harness and/or change its path or project root
  *   /ha-validate [name]  score the harness across the five subsystems
  *   /ha-disable          turn pi-harness off (no harness injection)
  *   /ha-enable           turn pi-harness back on
@@ -38,6 +39,7 @@ import {
 	listProjects,
 	loadState,
 	learnProject,
+	editProject,
 	pathExists,
 	projectDir,
 	readFeatureList,
@@ -193,8 +195,11 @@ interface HarnessToolDetails {
 }
 
 const HarnessParams = Type.Object({
-	action: StringEnum(["info", "list", "read", "features", "update-feature", "validate", "learn", "enable", "disable"] as const),
+	action: StringEnum(["info", "list", "read", "features", "update-feature", "validate", "learn", "edit", "enable", "disable"] as const),
 	project: Type.Optional(Type.String({ description: "Harness project name (defaults to the active one)" })),
+	newName: Type.Optional(Type.String({ description: "New harness name (for action=edit; renames the workspace folder)" })),
+	path: Type.Optional(Type.String({ description: "New harness workspace directory (for action=edit)" })),
+	projectRoot: Type.Optional(Type.String({ description: "New source project root (for action=edit)" })),
 	file: Type.Optional(Type.String({ description: "Harness-relative file to read (for action=read)" })),
 	featureId: Type.Optional(Type.String({ description: "Feature id, e.g. feat-002 (for action=update-feature)" })),
 	status: Type.Optional(StringEnum(FEATURE_STATUSES)),
@@ -278,7 +283,7 @@ export default function piHarness(pi: ExtensionAPI) {
 		name: "harness",
 		label: "Harness",
 		description:
-			"Inspect or update the active harness workspace: info, list, read a harness file, features, update a feature status with evidence, learn (scan source code into the harness), validate the harness, or toggle pi-harness on/off. Use this to find the harness index, feature_list.json, progress.md, and session-handoff.md.",
+			"Inspect or update the active harness workspace: info, list, read a harness file, features, update a feature status with evidence, learn (scan source code into the harness), edit (rename/move a harness), validate the harness, or toggle pi-harness on/off. Use this to find the harness index, feature_list.json, progress.md, and session-handoff.md.",
 		promptSnippet: "Inspect or update the active harness workspace",
 		parameters: HarnessParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -379,6 +384,40 @@ export default function piHarness(pi: ExtensionAPI) {
 				} catch (error) {
 					return {
 						content: [{ type: "text", text: `Learn failed: ${(error as Error).message}` }],
+						details: { action, project: record.name, error: (error as Error).message } as HarnessToolDetails,
+						isError: true,
+					};
+				}
+			}
+
+			if (action === "edit") {
+				if (!params.newName && !params.path && !params.projectRoot) {
+					return {
+						content: [{ type: "text", text: "Nothing to change: pass newName, path, and/or projectRoot." }],
+						details: { action, error: "nothing-to-change" } as HarnessToolDetails,
+						isError: true,
+					};
+				}
+				try {
+					const result = await editProject(record.name, {
+						newName: params.newName,
+						newPath: params.path,
+						projectRoot: params.projectRoot,
+					});
+					const changed = [result.renamed ? "renamed" : "", result.moved ? "moved" : ""].filter(Boolean).join(", ") || "metadata";
+					const text = [
+						`Updated harness (${changed})`,
+						`Name: ${result.previousName}${result.renamed ? ` -> ${result.record.name}` : ` (${result.record.name})`}`,
+						`Path: ${result.previousPath}${result.moved ? ` -> ${result.record.path}` : ""}`,
+						`Project root: ${result.record.projectRoot}`,
+					].join("\n");
+					return {
+						content: [{ type: "text", text }],
+						details: { action, project: result.record.name, path: result.record.path } as HarnessToolDetails,
+					};
+				} catch (error) {
+					return {
+						content: [{ type: "text", text: `Edit failed: ${(error as Error).message}` }],
 						details: { action, project: record.name, error: (error as Error).message } as HarnessToolDetails,
 						isError: true,
 					};
@@ -668,6 +707,52 @@ export default function piHarness(pi: ExtensionAPI) {
 				}
 			} catch (error) {
 				ctx.ui.notify(`Learn failed: ${(error as Error).message}`, "error");
+			}
+		},
+	});
+
+	// ---------------------------------------------------------------------
+	// /ha-edit
+	// ---------------------------------------------------------------------
+	pi.registerCommand("ha-edit", {
+		description: "Edit a harness: rename it and/or change its workspace path or source project root",
+		getArgumentCompletions: async (prefix) => {
+			const state = await loadState();
+			return [
+				...listProjects(state).map((p) => ({ value: p.name, label: p.name })),
+				{ value: "--name=", label: "--name=NEW-NAME (rename)" },
+				{ value: "--path=", label: "--path=/new/harness/dir (move)" },
+				{ value: "--project-root=", label: "--project-root=/source/path" },
+			].filter((item) => item.value.startsWith(prefix));
+		},
+		handler: async (args, ctx) => {
+			const { positional, flags } = parseCommandArgs(args);
+			const state = await loadState();
+			const record = await requireProject(ctx, state, positional[0]);
+			if (!record) return;
+
+			const newName = flag(flags, "name");
+			const newPath = flag(flags, "path");
+			const projectRoot = flag(flags, "project-root");
+			if (!newName && !newPath && !projectRoot) {
+				ctx.ui.notify("Nothing to change. Use --name=NEW, --path=/new/dir, or --project-root=/src.", "warning");
+				return;
+			}
+
+			try {
+				const result = await editProject(record.name, { newName, newPath, projectRoot });
+				const changed = [result.renamed ? "renamed" : "", result.moved ? "moved" : ""].filter(Boolean).join(", ") || "metadata";
+				ctx.ui.notify(
+					[
+						`Updated harness (${changed})`,
+						`Name: ${result.previousName}${result.renamed ? ` -> ${result.record.name}` : ` (${result.record.name})`}`,
+						`Path: ${result.previousPath}${result.moved ? ` -> ${result.record.path}` : ""}`,
+						`Project root: ${result.record.projectRoot}`,
+					],
+					"info",
+				);
+			} catch (error) {
+				ctx.ui.notify(`Edit failed: ${(error as Error).message}`, "error");
 			}
 		},
 	});

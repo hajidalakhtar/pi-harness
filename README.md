@@ -42,6 +42,7 @@ State (active project + registry) lives at
 | `/ha-list` | List harness workspaces |
 | `/ha-status [name]` | Show active harness + feature state |
 | `/ha-learn [name] [--root=/path] [--scan-only] [--max-files=N]` | Scan the source code and seed the harness docs + feature candidates |
+| `/ha-edit [name] [--name=NEW] [--path=/new/dir] [--project-root=/src]` | Rename a harness and/or change its workspace path or source root |
 | `/ha-validate [name]` | Score the harness across the five subsystems |
 | `/ha-disable` | Turn pi-harness off (stop harness injection) |
 | `/ha-enable` | Turn pi-harness back on |
@@ -67,6 +68,19 @@ State (active project + registry) lives at
 5. Unless `--scan-only` is passed, sends the agent a deep pass to verify and
    rewrite those docs against the real code and prioritize the features.
 
+`/ha-edit` manages existing harnesses without recreating them:
+
+```bash
+/ha-edit old-name --name=new-name      # rename (moves the workspace folder)
+/ha-edit my-app --path=/custom/dir     # move the workspace folder
+/ha-edit my-app --project-root=/src    # repoint the scanned source root
+/ha-edit my-app --name=new --project-root=/src   # combine
+```
+
+Renaming/moving updates the registry and the active pointer, and the folder
+contents are preserved. If the target name or path already exists, the edit is
+rejected.
+
 Start Pi with `--no-harness` to disable pi-harness for a single run without
 changing the persisted setting. `/ha-disable` and `/ha-enable` persist the
 toggle in `~/.pi/agent/pi-harness-state.json`.
@@ -79,6 +93,7 @@ toggle in `~/.pi/agent/pi-harness-state.json`.
 - `features` — list features with status
 - `update-feature { featureId, status?, evidence? }` — update the tracker; `status: "done"` requires evidence
 - `learn { root? }` — scan the source code and seed the harness
+- `edit { newName?, path?, projectRoot? }` — rename/move a harness or repoint its source root
 - `validate` — five-subsystem score (instructions, state, verification, scope, lifecycle)
 - `enable` / `disable` — toggle pi-harness on or off
 
