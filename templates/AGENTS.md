@@ -19,7 +19,7 @@ Before writing code:
 3. **Read `index.md`** for the harness map
 4. **Read `feature_list.json`** to see current feature state
 5. **Read `progress.md`** and `session-handoff.md` for continuity
-6. **Read project docs** (`docs/ARCHITECTURE.md`, `docs/PRODUCT.md`, README) if present
+6. **Read project docs** (`docs/ARCHITECTURE.md`, `docs/CODE-STYLE.md`, `docs/PLACEMENT.md`, `docs/PRODUCT.md`, README) if present
 7. **Run {{VERIFY_COMMAND_REF}}** to confirm the baseline is healthy
 8. **Review recent commits** with `git log --oneline -5`
 
@@ -31,6 +31,8 @@ If baseline verification is failing, repair that first before adding new scope.
 - **Verification required**: Don't claim done without running verification commands
 - **Update artifacts**: Before ending a session, update `progress.md` and `feature_list.json`
 - **Stay in scope**: Don't modify files unrelated to the current feature
+- **Match the code style**: Read `docs/CODE-STYLE.md` before writing code and follow it
+- **Place files correctly**: Read `docs/PLACEMENT.md` before creating a file; put controllers, services, models, components, and tests where the guide says — do not invent new locations
 - **Leave clean state**: The next session must be able to run {{VERIFY_COMMAND_REF}} immediately
 - **No fake passing**: Never mark a feature `done` without recorded evidence
 
@@ -41,6 +43,8 @@ If baseline verification is failing, repair that first before adding new scope.
 {{INIT_ARTIFACT_LINE}}
 - `session-handoff.md` — Short handoff for the next session
 - `index.md` — Harness index and artifact map
+- `docs/CODE-STYLE.md` — Confirmed code conventions to follow when writing code
+- `docs/PLACEMENT.md` — Where new files of each kind belong
 
 ## Definition of Done
 

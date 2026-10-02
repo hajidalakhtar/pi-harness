@@ -39,6 +39,8 @@ export const KNOWN_FILES = [
 	"docs/ARCHITECTURE.md",
 	"docs/PRODUCT.md",
 	"docs/SOURCE-MAP.md",
+	"docs/CODE-STYLE.md",
+	"docs/PLACEMENT.md",
 ] as const;
 
 export const FEATURE_STATUSES = ["not-started", "in-progress", "blocked", "done"] as const;
@@ -292,6 +294,58 @@ export function resolveHarnessFile(record: ProjectRecord, file: string): string 
 	return full;
 }
 
+/** Candidate instruction-file names inside a harness, in precedence order. */
+export const INSTRUCTION_FILE_NAMES = [
+	"AGENTS.override.md",
+	"AGENTS.md",
+	"AGENTS.MD",
+	"CLAUDE.md",
+	"CLAUDE.MD",
+] as const;
+
+/** Read the harness instruction file (AGENTS.md / CLAUDE.md), if one exists. */
+export async function readInstructionFile(
+	record: ProjectRecord,
+): Promise<{ path: string; name: string; content: string } | undefined> {
+	for (const name of INSTRUCTION_FILE_NAMES) {
+		const full = join(record.path, name);
+		if (await pathExists(full)) {
+			return { path: full, name, content: await readText(full) };
+		}
+	}
+	return undefined;
+}
+
+/** True when `child` is the same path as `parent` or lives inside it. */
+export function isPathInside(parent: string, child: string): boolean {
+	if (!parent) return false;
+	const rel = relative(resolve(parent), resolve(child));
+	return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+/**
+ * Put the harness instruction file at the front of the project context files and
+ * drop the active code repo's own AGENTS.md/CLAUDE.md so the harness one wins.
+ * User-level instructions outside the project and harness roots are preserved.
+ */
+export function applyHarnessInstructions(
+	contextFiles: Array<{ path: string; content: string }>,
+	record: ProjectRecord,
+	instructions: { path: string; content: string },
+	options: { keepProjectAgents?: boolean } = {},
+): Array<{ path: string; content: string }> {
+	const harnessInstructionPath = resolve(instructions.path);
+	const isAgentFile = (filePath: string) => /^(agents|claude)(\.override)?\.md$/i.test(basename(filePath));
+	const kept = contextFiles.filter((file) => {
+		const resolved = resolve(file.path);
+		if (resolved === harnessInstructionPath) return false;
+		if (!isAgentFile(file.path)) return true;
+		if (options.keepProjectAgents) return true;
+		return !isPathInside(record.path, resolved) && !isPathInside(record.projectRoot, resolved);
+	});
+	return [{ path: harnessInstructionPath, content: instructions.content }, ...kept];
+}
+
 // ---------------------------------------------------------------------------
 // Feature tracking
 // ---------------------------------------------------------------------------
@@ -422,6 +476,8 @@ export async function scaffoldProject(options: ScaffoldOptions): Promise<Scaffol
 		{ template: "quality-document.md", target: "quality-document.md" },
 		{ template: "docs/ARCHITECTURE.md", target: "docs/ARCHITECTURE.md" },
 		{ template: "docs/PRODUCT.md", target: "docs/PRODUCT.md" },
+		{ template: "docs/CODE-STYLE.md", target: "docs/CODE-STYLE.md" },
+		{ template: "docs/PLACEMENT.md", target: "docs/PLACEMENT.md" },
 	];
 
 	const written: string[] = [];
@@ -719,6 +775,76 @@ const LANGUAGE_BY_EXT: Record<string, string> = {
 	tf: "HCL",
 };
 
+const CODE_EXTS = new Set([
+	"js",
+	"jsx",
+	"mjs",
+	"cjs",
+	"ts",
+	"tsx",
+	"py",
+	"pyw",
+	"rb",
+	"go",
+	"rs",
+	"java",
+	"kt",
+	"kts",
+	"swift",
+	"c",
+	"h",
+	"cc",
+	"cpp",
+	"hpp",
+	"cs",
+	"php",
+	"scala",
+	"clj",
+	"ex",
+	"exs",
+	"erl",
+	"hs",
+	"lua",
+	"pl",
+	"pm",
+	"r",
+	"vue",
+	"svelte",
+	"astro",
+	"sh",
+	"bash",
+	"zsh",
+	"fish",
+	"ps1",
+	"sql",
+	"dart",
+]);
+
+/** Extensions whose statements normally end in a semicolon (used for style detection). */
+const SEMICOLON_EXTS = new Set([
+	"js",
+	"jsx",
+	"mjs",
+	"cjs",
+	"ts",
+	"tsx",
+	"java",
+	"kt",
+	"kts",
+	"cs",
+	"c",
+	"cc",
+	"cpp",
+	"h",
+	"hpp",
+	"php",
+	"swift",
+	"dart",
+]);
+
+const CODE_SAMPLE_LIMIT = 40;
+const CODE_SAMPLE_CHARS = 8000;
+
 const TEXT_EXTS = new Set([
 	...Object.keys(LANGUAGE_BY_EXT),
 	"txt",
@@ -844,6 +970,34 @@ export interface GitInfo {
 	dirty: boolean;
 }
 
+export interface CodeStyleSignals {
+	samples: number;
+	indent: string;
+	indentUnit: number;
+	quotes: string;
+	semicolons: string;
+	trailingCommas: string;
+	lineWidth: number;
+	moduleSystems: string[];
+	fileNaming: string[];
+	functionNaming: string[];
+	typeNaming: string[];
+	constNaming: string[];
+	commentStyles: string[];
+	errorHandling: string[];
+	concurrency: string[];
+	formattingTools: string[];
+	examples: Record<string, string[]>;
+}
+
+export interface PlacementHint {
+	kind: string;
+	directory: string;
+	role: string;
+	examples: string[];
+	namePattern: string;
+}
+
 export interface SourceScan {
 	root: string;
 	scannedAt: string;
@@ -858,6 +1012,8 @@ export interface SourceScan {
 	manifests: ManifestInfo[];
 	todos: TodoItem[];
 	tree: string[];
+	style: CodeStyleSignals;
+	placement: PlacementHint[];
 	git?: GitInfo;
 	readmeExcerpt?: string;
 }
@@ -973,6 +1129,303 @@ function inferDirectoryRole(path: string): string {
 		pkg: "Reusable packages",
 	};
 	return map[key] ?? "Source directory";
+}
+
+function classifyCase(name: string): string {
+	if (!name) return "other";
+	if (/^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/.test(name)) return "SCREAMING_SNAKE_CASE";
+	if (/^[A-Z][A-Za-z0-9]*$/.test(name)) return "PascalCase";
+	if (/^[a-z][A-Za-z0-9]*$/.test(name)) return "camelCase";
+	if (/^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/.test(name)) return "snake_case";
+	if (/^[a-z][a-z0-9]*(?:-[a-z0-9]+)+$/.test(name)) return "kebab-case";
+	return "other";
+}
+
+function topEntries(counts: Map<string, number>, limit = 4, minShare = 0.15): string[] {
+	const total = [...counts.values()].reduce((sum, value) => sum + value, 0);
+	if (!total) return [];
+	return [...counts.entries()]
+		.filter(([, count]) => count / total >= minShare)
+		.sort((a, b) => b[1] - a[1])
+		.slice(0, limit)
+		.map(([key]) => key);
+}
+
+function deriveNamePattern(examples: string[]): string {
+	if (!examples.length) return "(no existing files)";
+	const exts = new Map<string, number>();
+	for (const file of examples) {
+		const ext = extname(file).slice(1).toLowerCase();
+		if (ext) exts.set(ext, (exts.get(ext) ?? 0) + 1);
+	}
+	const topExt = topEntries(exts, 1, 0)[0];
+	const styles = new Map<string, number>();
+	for (const file of examples) {
+		const stem = topExt ? basename(file, `.${topExt}`) : basename(file);
+		const head = stem.split(/[.-]/)[0] ?? stem;
+		const style = classifyCase(head);
+		styles.set(style, (styles.get(style) ?? 0) + 1);
+	}
+	const style = topEntries(styles, 1, 0)[0] ?? "camelCase";
+	return `${style}${topExt ? ` + .${topExt}` : ""}`;
+}
+
+export function analyzeCodeStyle(
+	samples: Array<{ rel: string; content: string }>,
+	allFiles: string[],
+	configs: string[],
+	manifests: ManifestInfo[],
+	languages: LanguageStat[],
+): CodeStyleSignals {
+	const fileNaming = new Map<string, number>();
+	const functionNaming = new Map<string, number>();
+	const typeNaming = new Map<string, number>();
+	const constNaming = new Map<string, number>();
+	const moduleSystems = new Set<string>();
+	const commentStyles = new Set<string>();
+	const errorHandling = new Set<string>();
+	const concurrency = new Set<string>();
+	const examples: Record<string, string[]> = {};
+	const addExample = (category: string, value: string) => {
+		const list = (examples[category] ??= []);
+		if (list.length < 5 && !list.includes(value)) list.push(value);
+	};
+
+	for (const rel of allFiles) {
+		const ext = extname(rel).slice(1).toLowerCase();
+		if (!CODE_EXTS.has(ext)) continue;
+		const stem = basename(rel, `.${ext}`);
+		const head = stem.split(/[.-]/)[0] ?? stem;
+		const style = classifyCase(head);
+		fileNaming.set(style, (fileNaming.get(style) ?? 0) + 1);
+		addExample("fileNaming", rel);
+	}
+
+	let tabLines = 0;
+	let twoSpaceLines = 0;
+	let fourSpaceLines = 0;
+	let singleQuotes = 0;
+	let doubleQuotes = 0;
+	let semicolonLines = 0;
+	let statementLines = 0;
+	let trailingCommas = 0;
+	const lineLengths: number[] = [];
+
+	for (const sample of samples) {
+		const ext = extname(sample.rel).slice(1).toLowerCase();
+		const content = sample.content;
+
+		for (const line of content.split(/\r?\n/)) {
+			if (!line.trim()) continue;
+			lineLengths.push(line.length);
+			if (/^\t/.test(line)) {
+				tabLines += 1;
+			} else {
+				const spaces = line.match(/^( +)/)?.[1].length ?? 0;
+				if (spaces === 2) twoSpaceLines += 1;
+				if (spaces === 4) fourSpaceLines += 1;
+			}
+			singleQuotes += (line.match(/'/g) ?? []).length;
+			doubleQuotes += (line.match(/"/g) ?? []).length;
+
+			if (SEMICOLON_EXTS.has(ext)) {
+				const trimmed = line.trim();
+				const isComment = trimmed.startsWith("//") || trimmed.startsWith("*") || trimmed.startsWith("/*");
+				const opensBlock = /[{(\[,]$/.test(trimmed) || trimmed.endsWith("=>");
+				if (!isComment && !opensBlock) {
+					statementLines += 1;
+					if (trimmed.endsWith(";")) semicolonLines += 1;
+				}
+			}
+		}
+		trailingCommas += (content.match(/,\s*\n\s*[)\]}]/g) ?? []).length;
+
+		if (/\bimport\s+[\s\S]{0,120}?from\s+['"]/.test(content) || /\bexport\s+(default|const|function|class|\{)/.test(content) || /^\s*import\s+['"]/m.test(content)) {
+			moduleSystems.add("ES modules (import/export)");
+		}
+		if (/\brequire\s*\(|module\.exports/.test(content)) moduleSystems.add("CommonJS (require/module.exports)");
+		if (ext === "py" && /^\s*(from\s+[\w.]+\s+import|import\s+[\w.]+)/m.test(content)) moduleSystems.add("Python imports");
+		if (ext === "go" && /^import\s+/m.test(content)) moduleSystems.add("Go imports");
+		if (["java", "kt", "kts", "scala"].includes(ext) && /^import\s+/m.test(content)) {
+			moduleSystems.add(`${LANGUAGE_BY_EXT[ext] ?? ext} imports`);
+		}
+		if (ext === "rs" && /^use\s+/m.test(content)) moduleSystems.add("Rust use statements");
+
+		for (const match of content.matchAll(/\b(?:function|def|func|fn|fun)\s+([A-Za-z_$][\w$]*)/g)) {
+			const style = classifyCase(match[1]);
+			functionNaming.set(style, (functionNaming.get(style) ?? 0) + 1);
+			addExample("functionNaming", match[1]);
+		}
+		for (const match of content.matchAll(/\b(?:class|interface|type|enum|struct|trait|record)\s+([A-Za-z_$][\w$]*)/g)) {
+			const style = classifyCase(match[1]);
+			typeNaming.set(style, (typeNaming.get(style) ?? 0) + 1);
+			addExample("typeNaming", match[1]);
+		}
+		for (const match of content.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/g)) {
+			const style = classifyCase(match[1]);
+			constNaming.set(style, (constNaming.get(style) ?? 0) + 1);
+			addExample("constNaming", match[1]);
+		}
+
+		if (/^\s*(\/\/|#)/m.test(content)) commentStyles.add(ext === "py" || ext === "rb" || ext === "sh" ? "hash comments (#)" : "line comments (//)");
+		if (/\/\*/.test(content)) commentStyles.add("block comments (/* */)");
+		if (/^\s*\/{3}/m.test(content) || /\/\*\*/.test(content)) commentStyles.add("documentation comments (///, /**)");
+		if (ext === "py" && /("""|''')/.test(content)) commentStyles.add("docstrings");
+
+		if (/\btry\s*[{(]|\bcatch\s*\(|\bexcept\b|\bfinally\b/.test(content)) errorHandling.add("try/catch/finally");
+		if (/\bthrow\s+/.test(content) || /\braise\s+/.test(content)) errorHandling.add("throw/raise");
+		if (/\bResult</.test(content) || /->\s*Result/.test(content)) errorHandling.add("Result types");
+		if (/\bpanic\s*\(|\berrors\.New\b/.test(content)) errorHandling.add("panic/errors.New (Go)");
+		if (/\bexpect\s*\(|\.unwrap\s*\(/.test(content)) errorHandling.add("unwrap/expect (Rust)");
+
+		if (/\basync\s+|\bawait\s+/.test(content)) concurrency.add("async/await");
+		if (/\bPromise</.test(content) || /\.then\s*\(/.test(content)) concurrency.add("Promises");
+		if (/\bgo\s+func\b|\bgoroutine\b/.test(content)) concurrency.add("goroutines");
+		if (/\basyncio\b|\basync def\b/.test(content)) concurrency.add("asyncio");
+		if (/\btokio\b|\bspawn\s*\(/.test(content)) concurrency.add("async runtime / spawn");
+	}
+
+	lineLengths.sort((a, b) => a - b);
+	const p95 = lineLengths.length ? lineLengths[Math.floor(lineLengths.length * 0.95)] : 0;
+	const lineWidth = p95 ? Math.round(p95 / 10) * 10 : 0;
+
+	const spaces = twoSpaceLines + fourSpaceLines;
+	let indent = "unknown";
+	let indentUnit = 0;
+	if (tabLines > spaces) {
+		indent = "Tabs";
+		indentUnit = 1;
+	} else if (spaces > 0) {
+		indent = fourSpaceLines > twoSpaceLines ? "4 spaces" : "2 spaces";
+		indentUnit = fourSpaceLines > twoSpaceLines ? 4 : 2;
+	}
+
+	let quotes = "unknown";
+	if (singleQuotes + doubleQuotes > 0) {
+		if (doubleQuotes > singleQuotes * 1.3) quotes = "double quotes";
+		else if (singleQuotes > doubleQuotes * 1.3) quotes = "single quotes";
+		else quotes = "mixed";
+	}
+
+	let semicolons = "n/a";
+	if (statementLines > 0) {
+		const ratio = semicolonLines / statementLines;
+		semicolons = ratio > 0.6 ? "required" : ratio < 0.15 ? "omitted" : "mixed";
+	}
+
+	const trailingCommaStyle = trailingCommas > 3 ? "used" : "rare/none";
+
+	const formattingTools = detectFormattingTools(configs, manifests, languages);
+
+	return {
+		samples: samples.length,
+		indent,
+		indentUnit,
+		quotes,
+		semicolons,
+		trailingCommas: trailingCommaStyle,
+		lineWidth,
+		moduleSystems: [...moduleSystems],
+		fileNaming: topEntries(fileNaming),
+		functionNaming: topEntries(functionNaming),
+		typeNaming: topEntries(typeNaming),
+		constNaming: topEntries(constNaming),
+		commentStyles: [...commentStyles],
+		errorHandling: [...errorHandling],
+		concurrency: [...concurrency],
+		formattingTools,
+		examples,
+	};
+}
+
+function detectFormattingTools(configs: string[], manifests: ManifestInfo[], languages: LanguageStat[]): string[] {
+	const tools = new Set<string>();
+	const deps = new Set(manifests.flatMap((manifest) => manifest.dependencies.map((dep) => dep.toLowerCase())));
+	const lowerConfigs = configs.map((config) => config.toLowerCase());
+	const configHas = (needle: string) => lowerConfigs.some((config) => config.includes(needle));
+
+	if (deps.has("prettier") || configHas("prettier")) tools.add("Prettier");
+	if (deps.has("eslint") || configHas("eslint")) tools.add("ESLint");
+	if (deps.has("@biomejs/biome") || deps.has("biome")) tools.add("Biome");
+	if (deps.has("standard")) tools.add("StandardJS");
+	if (deps.has("black")) tools.add("Black");
+	if (deps.has("ruff")) tools.add("Ruff");
+	if (deps.has("flake8")) tools.add("Flake8");
+	if (deps.has("isort")) tools.add("isort");
+	if (deps.has("mypy") || deps.has("pyright")) tools.add("type checker (mypy/pyright)");
+	if (configHas("editorconfig")) tools.add("EditorConfig");
+	if (configHas("rustfmt")) tools.add("rustfmt");
+	if (configHas("clang-format")) tools.add("clang-format");
+
+	const names = new Set(languages.map((language) => language.name));
+	if (names.has("Go")) tools.add("gofmt (Go default)");
+	if (names.has("Rust") && !tools.has("rustfmt")) tools.add("rustfmt (Rust default)");
+	if ((names.has("Python") || names.has("Python (pyw)")) && !tools.has("Black") && !tools.has("Ruff")) {
+		tools.add("PEP 8 (Python default)");
+	}
+	return [...tools];
+}
+
+const PLACEMENT_KINDS: Array<{ kind: string; aliases: string[]; role: string }> = [
+	{ kind: "HTTP controller / handler", aliases: ["controllers", "controller", "handlers", "handler", "http"], role: "Request handling / orchestration" },
+	{ kind: "Route / endpoint", aliases: ["routes", "route", "router", "routers", "api", "endpoints"], role: "URL routing / API surface" },
+	{ kind: "Service / use case", aliases: ["services", "service", "usecases", "use-cases", "application"], role: "Business logic" },
+	{ kind: "Domain model / entity", aliases: ["models", "model", "entities", "entity", "domain"], role: "Domain data" },
+	{ kind: "Repository / data access", aliases: ["repositories", "repository", "repos", "dao", "db", "database", "persistence"], role: "Persistence" },
+	{ kind: "Schema / DTO / validation", aliases: ["schemas", "schema", "dtos", "dto", "types", "interfaces", "validation", "validators"], role: "Contracts / validation" },
+	{ kind: "UI component", aliases: ["components", "component", "ui"], role: "Reusable UI" },
+	{ kind: "Page / view / screen", aliases: ["pages", "page", "views", "view", "screens", "screen", "app"], role: "Routable views" },
+	{ kind: "Hook / composable", aliases: ["hooks", "hook", "composables"], role: "Reusable reactive logic" },
+	{ kind: "State store", aliases: ["store", "stores", "state", "redux", "slices"], role: "Shared state" },
+	{ kind: "Middleware / interceptor", aliases: ["middleware", "middlewares", "interceptors", "guards"], role: "Cross-cutting request logic" },
+	{ kind: "Utility / helper", aliases: ["utils", "util", "helpers", "helper", "lib", "libs", "shared", "common"], role: "Shared helpers" },
+	{ kind: "Configuration", aliases: ["config", "configs", "configuration", "settings"], role: "Configuration" },
+	{ kind: "Database migration", aliases: ["migrations", "migration"], role: "Schema changes" },
+	{ kind: "Test", aliases: ["tests", "test", "__tests__", "spec", "specs"], role: "Tests" },
+	{ kind: "CLI command", aliases: ["cli", "cmd", "commands", "bin"], role: "CLI entrypoints" },
+];
+
+export function inferPlacement(allFiles: string[]): PlacementHint[] {
+	const byDir = new Map<string, string[]>();
+	for (const rel of allFiles) {
+		const dir = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "";
+		if (!dir) continue;
+		const list = byDir.get(dir) ?? [];
+		list.push(rel);
+		byDir.set(dir, list);
+	}
+
+	const hints: PlacementHint[] = [];
+	for (const { kind, aliases, role } of PLACEMENT_KINDS) {
+		let best: { dir: string; files: string[] } | undefined;
+		for (const [dir, files] of byDir) {
+			const base = (dir.split("/").pop() ?? dir).toLowerCase();
+			if (!aliases.includes(base)) continue;
+			if (!best || files.length > best.files.length) best = { dir, files };
+		}
+		if (!best) continue;
+		const direct = best.files.filter((file) => !file.slice(best.dir.length + 1).includes("/"));
+		const pool = direct.length ? direct : best.files;
+		const examples = pool.slice(0, 4).map((file) => basename(file));
+		hints.push({
+			kind,
+			directory: best.dir,
+			role: role || inferDirectoryRole(best.dir),
+			examples,
+			namePattern: deriveNamePattern(examples),
+		});
+	}
+	return hints;
+}
+
+function samplePriority(rel: string): number {
+	const lower = rel.toLowerCase();
+	let score = 0;
+	if (/(controller|service|model|route|component|handler|repository|entity)/.test(lower)) score += 3;
+	if (/^(src|app|lib)\//.test(lower)) score += 1;
+	if (/(test|spec|mock|fixture)/.test(lower)) score -= 2;
+	if (lower.endsWith(".d.ts") || /(\.min\.|generated|vendor)/.test(lower)) score -= 3;
+	return score;
 }
 
 function parseManifest(rel: string, content: string): ManifestInfo | undefined {
@@ -1105,6 +1558,7 @@ export async function scanSourceCode(root: string, options: LearnOptions = {}): 
 	const tests: string[] = [];
 	const docs: string[] = [];
 	const configs: string[] = [];
+	const codeSamples: Array<{ rel: string; content: string }> = [];
 	let totalLines = 0;
 	let readBudget = TOTAL_READ_LIMIT_BYTES;
 	let readmeExcerpt: string | undefined;
@@ -1150,6 +1604,10 @@ export async function scanSourceCode(root: string, options: LearnOptions = {}): 
 		totalLines += lines;
 		if (language) bumpLang(language, lines);
 
+		if (CODE_EXTS.has(ext) && codeSamples.length < 150 && !looksLikeTest(file.rel)) {
+			codeSamples.push({ rel: file.rel, content: content.slice(0, CODE_SAMPLE_CHARS) });
+		}
+
 		if (MANIFEST_NAMES.has(file.name)) {
 			const info = parseManifest(file.rel, content);
 			if (info) manifests.push(info);
@@ -1178,6 +1636,16 @@ export async function scanSourceCode(root: string, options: LearnOptions = {}): 
 		}
 	}
 
+	codeSamples.sort((a, b) => samplePriority(b.rel) - samplePriority(a.rel));
+	const filePaths = files.map((file) => file.rel);
+	const style = analyzeCodeStyle(
+		codeSamples.slice(0, CODE_SAMPLE_LIMIT),
+		filePaths,
+		configs,
+		manifests,
+		[...languages.values()],
+	);
+	const placement = inferPlacement(filePaths);
 	const tree = files.map((file) => file.rel).sort();
 	return {
 		root: resolvedRoot,
@@ -1195,6 +1663,8 @@ export async function scanSourceCode(root: string, options: LearnOptions = {}): 
 		configs: configs.slice(0, 60),
 		manifests,
 		todos,
+		style,
+		placement,
 		tree,
 		git: await gitInfo(resolvedRoot),
 		readmeExcerpt,
@@ -1278,6 +1748,27 @@ ${scan.directories
 	.map((dir) => `- \`${dir.path}\` (${inferDirectoryRole(dir.path)}): describe what depends on it and what it depends on`)
 	.join("\n") || "- Describe the main request/data flow here."}
 
+## Where New Code Goes
+
+Full guide: \`docs/PLACEMENT.md\`. Quick map of detected locations:
+
+${scan.placement.length ? scan.placement.slice(0, 12).map((hint) => `- **${hint.kind}** → \`${hint.directory}/\` (${hint.namePattern})`).join("\n") : "- No conventional module directories were detected. Read \`docs/PLACEMENT.md\` and confirm with the user before inventing a location."}
+
+When adding a file, put it in the directory above and match the naming pattern of
+its existing files. Do not create a new directory for a kind that already has one.
+
+## Code Style
+
+Full guide: \`docs/CODE-STYLE.md\`. Detected baseline (${scan.style.samples} sample file(s)):
+
+- Indentation: ${scan.style.indent}${scan.style.indentUnit ? ` (unit ${scan.style.indentUnit})` : ""}
+- Quotes: ${scan.style.quotes}
+- Semicolons: ${scan.style.semicolons}
+- Trailing commas: ${scan.style.trailingCommas}
+- Module system: ${scan.style.moduleSystems.join(", ") || "(not detected)"}
+- Naming: files ${scan.style.fileNaming.join("/") || "?"}, types ${scan.style.typeNaming.join("/") || "?"}, functions ${scan.style.functionNaming.join("/") || "?"}
+- Tooling: ${scan.style.formattingTools.join(", ") || "(not detected)"}
+
 ## Technical Debt Signals
 
 ${scan.todos.length
@@ -1300,6 +1791,119 @@ Run the harness verification path, then the project's own checks:
 - \`/ha-learn\` scanned ${scan.totalFiles} files at ${scan.scannedAt}
 - Languages: ${scan.languages.slice(0, 5).map((lang) => lang.name).join(", ") || "none"}
 - Commit: ${scan.git?.recentCommits[0] ?? "(none)"}
+`;
+}
+
+export function renderCodeStyleMd(record: ProjectRecord, scan: SourceScan): string {
+	const title = projectTitle(record, scan);
+	const style = scan.style;
+	const rows: Array<[string, string]> = [
+		["Samples analyzed", String(style.samples)],
+		["Indentation", style.indent + (style.indentUnit ? ` (unit ${style.indentUnit})` : "")],
+		["Quote style", style.quotes],
+		["Semicolons", style.semicolons],
+		["Trailing commas", style.trailingCommas],
+		["Approx. line width (p95)", style.lineWidth ? String(style.lineWidth) : "unknown"],
+		["Module system", style.moduleSystems.join(", ") || "(not detected)"],
+		["File naming", style.fileNaming.join(", ") || "(not detected)"],
+		["Class / type naming", style.typeNaming.join(", ") || "(not detected)"],
+		["Function naming", style.functionNaming.join(", ") || "(not detected)"],
+		["Variable / const naming", style.constNaming.join(", ") || "(not detected)"],
+		["Comments", style.commentStyles.join(", ") || "(not detected)"],
+		["Error handling", style.errorHandling.join(", ") || "(not detected)"],
+		["Async / concurrency", style.concurrency.join(", ") || "(not detected)"],
+		["Formatter / linter", style.formattingTools.join(", ") || "(not detected)"],
+	];
+	const exampleSection = Object.entries(style.examples)
+		.filter(([, values]) => values.length)
+		.map(([category, values]) => `- **${category}:** ${values.map((value) => `\`${value}\``).join(", ")}`)
+		.join("\n");
+	return `# Code Style — ${title}
+
+> Generated by \`/ha-learn\` on ${scan.scannedAt} from ${style.samples} source sample(s).
+> These are heuristic signals. Verify them against the real code and correct anything wrong.
+
+## Detected Signals
+
+| Signal | Detected value |
+|---|---|
+${rows.map(([key, value]) => `| ${key} | ${value} |`).join("\n")}
+
+## Representative Files
+
+${exampleSection || "- (no samples collected)"}
+
+## Confirmed Conventions
+
+Fill this in after reading the sample files above. Replace any wrong detected
+value and add rules the scanner cannot infer (import order, error taxonomy,
+logging, testing style, code review expectations).
+
+| Rule | Convention | Evidence (file) |
+|---|---|---|
+|  |  |  |
+
+## Canonical Examples
+
+List the files new code should imitate:
+
+- Best model / service example:
+- Best controller / handler example:
+- Best test example:
+
+## Update History
+
+- ${scan.scannedAt}: seeded by \`/ha-learn\`.
+`;
+}
+
+export function renderPlacementMd(record: ProjectRecord, scan: SourceScan): string {
+	const title = projectTitle(record, scan);
+	const rows = scan.placement.length
+		? scan.placement
+				.map(
+					(hint) =>
+						`| ${hint.kind} | \`${hint.directory}/\` | ${hint.examples.map((example) => `\`${example}\``).join(", ") || "—"} | ${hint.namePattern} |`,
+				)
+				.join("\n")
+		: "| (none detected) | — | — | — |";
+	return `# Placement Guide — ${title}
+
+> Generated by \`/ha-learn\` on ${scan.scannedAt} from \`${scan.root}\`.
+> Inferred from existing directory names and files. Verify before relying on it.
+
+## Where To Put New Code
+
+| Kind | Directory | Existing examples | Naming pattern |
+|---|---|---|---|
+${rows}
+
+## Decision Recipe
+
+1. Identify the kind of file (controller, service, model, component, …).
+2. Find its row above and create the file in that directory.
+3. Match the naming pattern of the existing examples in that directory.
+4. Follow \`docs/CODE-STYLE.md\` for formatting and naming inside the file.
+5. Add or update the matching test next to the existing tests.
+6. If the kind has no row, ask the user instead of inventing a new location.
+
+## Layer Rules
+
+- What may import what (dependency direction):
+- What must NOT be imported by:
+- Shared code lives in:
+
+## Adding A New Module
+
+- [ ] Created in the correct directory from the table above
+- [ ] File and symbol names match the surrounding conventions
+- [ ] Wired into the existing registration / routing / bootstrap file
+- [ ] Test added following the existing test layout
+- [ ] No cross-layer imports that violate the layer rules
+
+## Update History
+
+- ${scan.scannedAt}: seeded by \`/ha-learn\`.
 `;
 }
 
@@ -1421,6 +2025,12 @@ export function deriveFeatures(scan: SourceScan, existing: Feature[]): Feature[]
 	if (!scan.tests.length && scan.totalFiles > 5) {
 		push("Establish a test baseline", "No test files were detected during /ha-learn. Add a minimal test suite for the entry points.");
 	}
+	if (scan.style.samples > 0) {
+		push(
+			"Confirm code style & placement guide",
+			"Read docs/CODE-STYLE.md and docs/PLACEMENT.md, correct anything wrong, and add canonical examples so future files match house style.",
+		);
+	}
 	return candidates;
 }
 
@@ -1444,6 +2054,8 @@ export async function learnProject(record: ProjectRecord, options: LearnOptions 
 		{ path: "docs/ARCHITECTURE.md", content: renderArchitectureMd(record, scan) },
 		{ path: "docs/PRODUCT.md", content: renderProductMd(record, scan) },
 		{ path: "docs/SOURCE-MAP.md", content: renderSourceMapMd(record, scan) },
+		{ path: "docs/CODE-STYLE.md", content: renderCodeStyleMd(record, scan) },
+		{ path: "docs/PLACEMENT.md", content: renderPlacementMd(record, scan) },
 		{ path: "quality-document.md", content: renderQualityMd(record, scan) },
 	];
 
@@ -1471,6 +2083,8 @@ export async function learnProject(record: ProjectRecord, options: LearnOptions 
 - Languages: ${scan.languages.slice(0, 5).map((lang) => lang.name).join(", ") || "none"}
 - Candidate features added: ${candidates.length}
 - Debt markers: ${scan.todos.length}
+- Code style samples: ${scan.style.samples} (${scan.style.indent}, ${scan.style.quotes}, semicolons ${scan.style.semicolons})
+- Placement hints: ${scan.placement.length}
 
 ## Current State
 
@@ -1478,7 +2092,7 @@ Harness docs were seeded from a source scan. Verify them against the real code.
 
 ## Next Steps
 
-1. Review \`docs/ARCHITECTURE.md\` and \`docs/SOURCE-MAP.md\` for accuracy.
+1. Review \`docs/ARCHITECTURE.md\`, \`docs/SOURCE-MAP.md\`, \`docs/CODE-STYLE.md\`, and \`docs/PLACEMENT.md\` for accuracy.
 2. Turn the top debt markers into prioritized features in \`feature_list.json\`.
 3. Run the verification path and record evidence.`;
 	await writeText(progressPath, appendSection(progress, "## Learn Baseline", learnSection));
@@ -1490,7 +2104,9 @@ Harness docs were seeded from a source scan. Verify them against the real code.
 		const indexSection = `## Learned Code Map — ${scan.scannedAt}
 
 - \`docs/SOURCE-MAP.md\` — full file tree and directory sizes
-- \`docs/ARCHITECTURE.md\` — languages, entry points, dependencies, layers
+- \`docs/ARCHITECTURE.md\` — languages, entry points, dependencies, layers, where new code goes
+- \`docs/CODE-STYLE.md\` — detected formatting, naming, and tooling conventions
+- \`docs/PLACEMENT.md\` — where to create controllers, services, models, components, tests
 - \`docs/PRODUCT.md\` — product intent and user-visible surface
 - \`quality-document.md\` — metrics snapshot
 
@@ -1512,12 +2128,13 @@ Verify and refine the auto-generated harness documents against the real code.
 ## What Was Done
 
 - Scanned \`${scan.root}\`: ${scan.totalFiles} files, ${scan.totalLines} lines
-- Wrote \`docs/ARCHITECTURE.md\`, \`docs/PRODUCT.md\`, \`docs/SOURCE-MAP.md\`, \`quality-document.md\`
+- Wrote \`docs/ARCHITECTURE.md\`, \`docs/PRODUCT.md\`, \`docs/SOURCE-MAP.md\`, \`docs/CODE-STYLE.md\`, \`docs/PLACEMENT.md\`, \`quality-document.md\`
 - Added ${candidates.length} candidate feature(s) to \`feature_list.json\`
+- Detected code style from ${scan.style.samples} sample(s) and ${scan.placement.length} placement location(s)
 
 ## Recommended Next Step
 
-Read \`docs/ARCHITECTURE.md\` and \`docs/SOURCE-MAP.md\`, correct anything wrong, then pick one feature from \`feature_list.json\`.
+Read \`docs/ARCHITECTURE.md\`, \`docs/CODE-STYLE.md\`, and \`docs/PLACEMENT.md\`, correct anything wrong, then pick one feature from \`feature_list.json\`.
 
 ## Blockers
 
@@ -1525,7 +2142,7 @@ Read \`docs/ARCHITECTURE.md\` and \`docs/SOURCE-MAP.md\`, correct anything wrong
 
 ## Files
 
-- \`docs/ARCHITECTURE.md\`, \`docs/PRODUCT.md\`, \`docs/SOURCE-MAP.md\`
+- \`docs/ARCHITECTURE.md\`, \`docs/PRODUCT.md\`, \`docs/SOURCE-MAP.md\`, \`docs/CODE-STYLE.md\`, \`docs/PLACEMENT.md\`
 - \`feature_list.json\`, \`progress.md\`, \`quality-document.md\`
 
 ## Verification

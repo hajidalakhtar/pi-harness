@@ -40,9 +40,11 @@ import {
 	loadState,
 	learnProject,
 	editProject,
+	applyHarnessInstructions,
 	pathExists,
 	projectDir,
 	readFeatureList,
+	readInstructionFile,
 	readText,
 	resolveHarnessFile,
 	resolveProject,
@@ -105,7 +107,7 @@ function formatSummary(summary: FeatureSummary): string {
 	return lines.join("\n");
 }
 
-function buildHarnessSection(record: ProjectRecord, summary: FeatureSummary | undefined): string {
+function buildHarnessSection(record: ProjectRecord, summary: FeatureSummary | undefined, instructionFile?: string): string {
 	const lines = [
 		`## Harness (active)`,
 		``,
@@ -118,15 +120,23 @@ function buildHarnessSection(record: ProjectRecord, summary: FeatureSummary | un
 		`read them from the harness root above first. Do not guess or read from an`,
 		`unrelated cwd unless the harness lacks the file.`,
 		``,
-		`Key files: index.md, AGENTS.md, feature_list.json, progress.md, session-handoff.md, init.sh`,
+		`Key files: index.md, ${instructionFile ?? "AGENTS.md"}, feature_list.json, progress.md, session-handoff.md, init.sh`,
+		`Code conventions: docs/CODE-STYLE.md — read before writing code.`,
+		`File placement: docs/PLACEMENT.md — read before creating a controller, service, model, component, or test.`,
 	];
+	if (instructionFile) {
+		lines.push(
+			``,
+			`Authoritative instructions: the harness file \`${instructionFile}\` is loaded as project context and overrides any other AGENTS.md/CLAUDE.md. Follow it.`,
+		);
+	}
 	if (summary) {
 		lines.push(``);
 		lines.push(`Feature state: ${summary.done}/${summary.total} done, ${summary.inProgress} in progress, ${summary.blocked} blocked`);
 		if (summary.active) lines.push(`Active feature: ${formatFeatureLine(summary.active)}`);
 		if (summary.next) lines.push(`Next feature: ${formatFeatureLine(summary.next)}`);
 	}
-	lines.push(`Rules: one feature at a time; run ./init.sh before claiming done; record evidence before status done.`);
+	lines.push(`Rules: one feature at a time; run ./init.sh before claiming done; record evidence before status done; match docs/CODE-STYLE.md and place files per docs/PLACEMENT.md.`);
 	return lines.join("\n");
 }
 
@@ -150,14 +160,16 @@ Scan summary: ${result.files} files, ${result.lines} lines, ${result.featuresAdd
 
 Do a deep learning pass now, working only inside the harness and the source root:
 
-1. Read the seeded artifacts: docs/ARCHITECTURE.md, docs/SOURCE-MAP.md, docs/PRODUCT.md, feature_list.json, quality-document.md, index.md.
-2. Study the real source at ${result.root} (read, grep, find) to verify every claim.
-3. Rewrite docs/ARCHITECTURE.md with the confirmed architecture: components, responsibilities, boundaries, data flow, and key files.
-4. Rewrite docs/PRODUCT.md with confirmed product intent and user-visible behavior.
-5. Refine feature_list.json with the harness tool: correct names/descriptions, add dependencies, prioritize, and set status/evidence only when verified.
-6. Update progress.md and session-handoff.md so the next session can resume.
+1. Read the seeded artifacts: docs/ARCHITECTURE.md, docs/SOURCE-MAP.md, docs/CODE-STYLE.md, docs/PLACEMENT.md, docs/PRODUCT.md, feature_list.json, quality-document.md, index.md.
+2. Study the real source at ${result.root} (read, grep, find). Read 5-10 representative files end to end, covering the main layers (entry point, a controller/handler, a service, a model, a test). Do not trust the scan alone.
+3. Rewrite docs/ARCHITECTURE.md with the confirmed architecture: components, responsibilities, boundaries, dependency direction, data flow, key files, and a "Where New Code Goes" section.
+4. Rewrite docs/CODE-STYLE.md with the confirmed conventions: indentation, quotes, semicolons, max line length, import ordering, file/type/function/variable naming, error handling, logging, async style, comment style, and test conventions. Replace every heuristic guess with what the code actually does and cite a representative file per rule.
+5. Rewrite docs/PLACEMENT.md with confirmed placement: for each kind (controller/handler, route, service, model/entity, repository, schema/DTO, component, hook, store, middleware, util, config, migration, test) record the exact directory, an existing example file, and the file-naming pattern. State the layer import rules and what must not be imported where.
+6. Rewrite docs/PRODUCT.md with confirmed product intent and user-visible behavior.
+7. Refine feature_list.json with the harness tool: correct names/descriptions, add dependencies, prioritize, and set status/evidence only when verified.
+8. Update progress.md and session-handoff.md so the next session can resume.
 
-Do not mark any feature done without recorded evidence. Report what you changed.`;
+When you answer, state the code-style conventions and the placement rule for each new file kind, so it is clear what the next agent must follow. Do not mark any feature done without recorded evidence. Report what you changed.`;
 }
 
 async function loadSummary(record: ProjectRecord): Promise<FeatureSummary | undefined> {
@@ -266,14 +278,27 @@ export default function piHarness(pi: ExtensionAPI) {
 		);
 	});
 
-	// The core mechanism: tell the agent where the harness lives every turn.
+	// The core mechanism: tell the agent where the harness lives every turn, and
+	// load the harness instruction file (AGENTS.md/CLAUDE.md) as project context so
+	// it is always read by default and wins over the repo's own AGENTS.md.
 	pi.on("before_agent_start", async (event, ctx) => {
 		if (sessionDisabled || (await isDisabled())) return;
 		const state = await loadState();
 		const record = resolveProject(state) ?? detectProjectForCwd(state, ctx.cwd);
 		if (!record) return;
 		const summary = await loadSummary(record);
-		event.systemPromptOptions.sections.harness_state = buildHarnessSection(record, summary);
+		const instructions = await readInstructionFile(record);
+		event.systemPromptOptions.sections.harness_state = buildHarnessSection(record, summary, instructions?.name);
+
+		if (!instructions) return;
+
+		const keepProjectAgents = process.env.PI_HARNESS_KEEP_PROJECT_AGENTS === "1";
+		event.systemPromptOptions.contextFiles = applyHarnessInstructions(
+			event.systemPromptOptions.contextFiles ?? [],
+			record,
+			{ path: instructions.path, content: instructions.content },
+			{ keepProjectAgents },
+		);
 	});
 
 	// ---------------------------------------------------------------------
@@ -283,7 +308,7 @@ export default function piHarness(pi: ExtensionAPI) {
 		name: "harness",
 		label: "Harness",
 		description:
-			"Inspect or update the active harness workspace: info, list, read a harness file, features, update a feature status with evidence, learn (scan source code into the harness), edit (rename/move a harness), validate the harness, or toggle pi-harness on/off. Use this to find the harness index, feature_list.json, progress.md, and session-handoff.md.",
+			"Inspect or update the active harness workspace: info, list, read a harness file, features, update a feature status with evidence, learn (scan source code into the harness: architecture, code style, placement guide, features), edit (rename/move a harness), validate the harness, or toggle pi-harness on/off. Use this to find the harness index, feature_list.json, progress.md, and session-handoff.md.",
 		promptSnippet: "Inspect or update the active harness workspace",
 		parameters: HarnessParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -669,7 +694,7 @@ export default function piHarness(pi: ExtensionAPI) {
 	// /ha-learn
 	// ---------------------------------------------------------------------
 	pi.registerCommand("ha-learn", {
-		description: "Scan the project source code and seed the harness (architecture, product, source map, features)",
+		description: "Scan the project source code and seed the harness (architecture, code style, placement, product, source map, features)",
 		getArgumentCompletions: async (prefix) => {
 			const state = await loadState();
 			return [
